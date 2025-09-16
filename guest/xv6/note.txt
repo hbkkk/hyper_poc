@@ -1,0 +1,246 @@
+============================================ 【 调试记录 / 问题思考 】 ============================================
+
+· 问题1: (背景)想将xv6 arm64版本的kernel elf, 通过objcopy导出为image格式, 然后直接由qemu加载运行, 为了后续hyper_poc加载
+       xv6做准备. 但是当qemu指定-kernel kernel.img加载运行的时候, 发现开启MMU并跳转到高地址后就卡住了, 但是在开启MMU之前
+       是可以正常运行, 且串口有打印输出.
+
+分析过程:
+       a) qemu启动命令添加"-d in_asm,cpu"调试参数, 输出指令加载和CPU状态, 发现当PC跳转到高地址后, 地址上的内容都为0, 如下:
+            IN: 
+            0x4008011c:  d61f0020  br       x1
+
+            PC=000000004008011c X00=0000000000c50839 X01=ffffff8040000120
+            X02=000000004002502f X03=ffffff8000000000 X04=ffffff8040000000
+            X05=0000000000000001 X06=0000000000000003 X07=0000000040088000
+            X08=0000000040088003 X09=0000000040200405 X10=0000000000000000
+            X11=0000000000000000 X12=0000000000000000 X13=0000000000000000
+            X14=0000000000000000 X15=0000000000000000 X16=0000000000000000
+            X17=0000000000000000 X18=0000000000000000 X19=0000000000000000
+            X20=0000000000000000 X21=0000000000000000 X22=0000000000000000
+            X23=0000000000000000 X24=0000000000000000 X25=0000000000000000
+            X26=0000000000000000 X27=0000000000000000 X28=0000000000000000
+            X29=0000000000000000 X30=0000000000000000  SP=0000000000000000
+            PSTATE=200003c5 --C- EL1h
+            ----------------
+            IN: 
+            0xffffff8040000120:  00000000  .byte    0x00, 0x00, 0x00, 0x00
+
+            PC=ffffff8040000120 X00=0000000000c50839 X01=ffffff8040000120
+            X02=000000004002502f X03=ffffff8000000000 X04=ffffff8040000000
+            X05=0000000000000001 X06=0000000000000003 X07=0000000040088000
+            X08=0000000040088003 X09=0000000040200405 X10=0000000000000000
+            X11=0000000000000000 X12=0000000000000000 X13=0000000000000000
+            X14=0000000000000000 X15=0000000000000000 X16=0000000000000000
+            X17=0000000000000000 X18=0000000000000000 X19=0000000000000000
+            X20=0000000000000000 X21=0000000000000000 X22=0000000000000000
+            X23=0000000000000000 X24=0000000000000000 X25=0000000000000000
+            X26=0000000000000000 X27=0000000000000000 X28=0000000000000000
+            X29=0000000000000000 X30=0000000000000000  SP=0000000000000000
+            PSTATE=200003c5 --C- EL1h
+          可以看到PC指向0xffffff8040000120处后, 该地址上的内容为0, 导致程序hung住, 因此怀疑是MMU页表建立有问题;
+       b) 通过gdb调试, 发现0x40000000处的内存内容, 并不是kernel.img的第一条指令, 而是其他的内容, 然后通过"x /0x200000 0x40000000"
+          查看 [0x40000000 ~ 0x40200000] 这段内存中的内容, 发现kernel.img被加载到了0x40080000内存处, 如下所示:
+            0x40080000:	0x58000b08	0xd2800624	0xf9000104	0xd53800a1
+            0x40080010:	0x92400421	0xb4000041	0x14000034	0x90000041
+            0x40080020:	0x180009e2	0x34000082	0xf800843f	0x51000442
+            0x40080030:	0x17fffffd	0xd0000040	0xd2a80001	0x58000962
+       c) 对比实验, 加载kernel这个elf文件运行, 通过gdb查看0x40000000地址上的内容, 发现是kernel代码段的内容;
+
+根因:  采用kernel这个elf的格式加载的时候, qemu/uboot会解析这个kernel elf并将kernel加载到指定代码段地址运行, 因此这种方式下
+       加载起来的kernel是在0x40000000地址上开始运行的. 但是, 若通过-kernel kernel.img的方式运行的话, qemu会将这个image
+       文件加载到0x40080000运行, 但这样的话就会导致页表建立的时候出错, 内核启动阶段是Hard-Code的形式默认内核物理地址从0x40000000
+       开始的, 因此建立的ttbr1_el1页表中的表项就出错了
+
+知识点: qemu加载kernel时, 由谁负责将内核加载到指定物理内存地址上？
+    qemu在arm64架构下通过-kernel参数加载内核时, 通常由qemu自身负责将内核加载到内存的指定物理地址;默认情况下, 
+若仅使用-kernel参数, qemu不会涉及u-boot, uboot是一个独立的引导加载程序, 需要在qemu中通过-bios参数指定使用.
+    若没有配置uboot, qemu会直接加载内核到内存并跳转执行, 绕过任何外部引导加载程序.
+    若配置了uboot(例如通过-bios u-boot.bin), u-boot会接管内核加载过程, 这种情况下, u-boot会解析-kernel指定文件, 并根据
+       u-boot的配置决定加载地址. 
+
+Workaround:
+    修改kernel.ld的物理加载地址为0x40080000, 以及对应的起始地址的编译地址为0xffffff8040080000. 这么做的原因单纯是为了简单偷懒=。=
+    因为xv6采用的是2M粒度的映射, 而xv6的内核大小为148K(远小于2M), 所以在entry.S中映射的时候, 传递的物理地址0x40000000, 2M映射后, 
+    是完全可以覆盖xv6内核所在物理内存区域的。这样一来, 内核就可以正常跑起来了.
+    但是, 这么做有一个潜在的问题: 映射了一些本身不属于xv6内核的物理内存区域（0x40000000 ~ 0x40080000）, 若通过对应虚拟地址访问了这些
+    物理地址, 可能造成一些未定义的问题. （不过话说回来, 原本xv6 arm64中的实现也是2M映射, 同样会映射一些内核大小以外的区域=。=）
+
+插曲: 一开始尝试将所有0x40000000相关的地址都修改为0x40080000, 包括entry.S中建立页表时使用到的起始物理地址. 但是这么做完之后还是没有
+     通过kernel.img将内核拉起来。。。调查后发现: 由于xv6中的内存模型采用的是“39位有效地址（范围: 512GB）”、3级页表映射(PUD: 1G 、PMD: 2M 、PTE: 4K),
+     并且在建立内核页表时, 采用的是PMD 2M粒度进行映射的（重点！！）; 那么, 当针对“0x40080000”这个地址进行映射时, 会将它进行2M对齐, 
+     对齐后的地址为“0x40200000”, 而xv6内核image本身的大小才148KB左右, 也就是内核image需要映射的末尾地址是“0x400a5030”, 该地址小于“0x40200000”,
+     也就是说 0x40080000~0x400a5030 这段xv6内核所在物理地址, 根本就没有被映射到页表中, 导致开启MMU并跳转到内核高地址执行时hung住。如下图所示:
+                                                 [   xv6内核2M对齐后的映射物理地址区间   ]
+    [   xv6内核所在物理地址(148K)   ]
+
+Fix(TBD): 修改entry.S中建立页表的代码, 支持内核可以在任意地址上启动, 并创建页表 
+        （该方案感觉最合适, 尤其后续用于hyper场景下, 不过好像也没关系, kernel作为vm的加载物理地址其实是ipa, 可以由hyper设置的）
+
+
+*** 重要 ***
+· 问题2: Hyper加载xv6运行后, xv6的主核执行到gicdinit()时, 写gicd_igroup相关寄存器后, 会死循环一致触发同一个寄存器的写操作陷入EL2,
+         现象如下所示, 始终触发对gicd_igroup<0>的写操作然后陷入到EL2:
+
+[vgicd_mmio_read] read GICD_TYPER, val=0x37a0007
+lines 7
+[vgicd_mmio_write] write GICD_IGROUPR<0>, val=0xffffffff
+[vgicd_mmio_write] write GICD_IGROUPR<0>, val=0xffffffff
+[vgicd_mmio_write] write GICD_IGROUPR<0>, val=0xffffffff
+[vgicd_mmio_write] write GICD_IGROUPR<0>, val=0xffffffff
+[vgicd_mmio_write] write GICD_IGROUPR<0>, val=0xffffffff
+
+但是当在xv6中gicdinit函数里, 写gicd_igroup寄存器之前, 添加一个printf操作后, 就没问题了, 添加的代码如下:
+
+  for(int i = 0; i < lines; i++) {
+    // TODO: 加了下面这行打印，行为又不一样了，而且好像目前CPU上有中断到来！
+    printf("######### i=%d, lines=%d\n", i, lines);
+    gicd_write(D_IGROUPR(i), ~0);   // 死循环了？？？
+  }
+
+不出问题的log如下:
+
+[vgicd_mmio_read] read GICD_TYPER, val=0x37a0007
+lines 7
+######### i=0, lines=7
+[vgicd_mmio_write] write GICD_IGROUPR<0>, val=0xffffffff
+######### i=1, lines=7
+[vgicd_mmio_write] write GICD_IGROUPR<1>, val=0xffffffff
+######### i=2, lines=7
+[vgicd_mmio_write] write GICD_IGROUPR<2>, val=0xffffffff
+######### i=3, lines=7
+[vgicd_mmio_write] write GICD_IGROUPR<3>, val=0xffffffff
+######### i=4, lines=7
+[vgicd_mmio_write] write GICD_IGROUPR<4>, val=0xffffffff
+######### i=5, lines=7
+[vgicd_mmio_write] write GICD_IGROUPR<5>, val=0xffffffff
+######### i=6, lines=7
+[vgicd_mmio_write] write GICD_IGROUPR<6>, val=0xffffffff
+
+
+定位过程: 
+1) 将xv6访问mmio陷入内核后, 执行handler前后时elr_el2打印出来, 发现elr_el2的确有加4, 如下所示:
+[lower_el_sync_handler]: before handler, elr_el2: 0xffffff804000786c
+[vgicd_mmio_write] write GICD_IGROUPR<0>, val=0xffffffff
+[lower_el_sync_handler]: after handler, elr_el2: 0xffffff8040007870
+
+2) 通过反汇编查看出问题地址的汇编代码, 在for循环中没有添加printf的版本, 如下所示: 
+/home/hbk/workspace/hyper_demo/hyper_poc/guest/xv6/kernel/gicv3.c:102
+  *(volatile uint32 *)(gicv3.gicd + off) = val;
+ffffff804000786c:   b8004401    str w1, [x0], #4		// 直接将值写入地址 [x0]，并将 x0 自增 4
+ffffff8040007870:   17fffffc    b   ffffff8040007860 <gicv3init+0x70>
+
+而在for循环中添加了printf的版本, 反汇编代码如下: 
+/home/hbk/workspace/hyper_demo/hyper_poc/guest/xv6/kernel/gicv3.c:102
+  *(volatile uint32 *)(gicv3.gicd + off) = val;
+ffffff8040007880:   f9400281    ldr x1, [x20]			// 加载 gicv3.gicd 的基地址
+ffffff8040007884:   91008260    add x0, x19, #0x20		// 计算偏移量
+ffffff8040007888:   91000673    add x19, x19, #0x1
+ffffff804000788c:   d37ef400    lsl x0, x0, #2			// 将偏移量左移 2 位（乘以 4）
+ffffff8040007890:   b8206837    str w23, [x1, x0]		// 将值写入计算出的地址
+ffffff8040007894:   17fffff5    b   ffffff8040007868 <gicv3init+0x78>
+
+发现加了printf后, gicd_write函数的汇编代码就变了, 怀疑跟编译优化有关, 导致死循环, 于是在函数gicdinit的定义前, 加上了
+__attribute__((optimize("O0"))), 去除编译优化, 试验后, 的确问题就解决了...很无语, 尝试看能不能继续定位下具体原因！
+
+在for循环中添加printf导致两次编译出来的反汇编实现不一致的原因, copilot的回答如下:
+- 有 printf("i=%d\n", i); 的情况:
+   printf 是一个复杂的函数调用，编译器会认为 printf 可能会影响全局状态（如内存、寄存器等）. 因此，编译器会保守地处理
+   gicd_write，确保其行为不会被优化掉或重排。结果是，gicd_write 的实现中，编译器生成了更详细的指令序列（如 ldr、add、lsl 等），
+   以确保内存访问的正确性.
+- 没有 printf("i=%d\n", i); 的情况:
+   如果没有 printf，编译器会认为 gicd_write 的行为是局部的，且没有副作用;
+   编译器可能会对循环中的 gicd_write 进行优化，例如：
+	  - 合并指令（如直接使用 str w1, [x0], #4 来完成内存写入和地址递增）。
+	  - 简化寄存器操作
+
+3) 真正原因: VM的代码被编译优化后, Hypervisor模拟vm的mmio操作时, 仅仅修改PC(即: elr_el2)可能是不够的！需要通过
+    由于xv6作为vm运行, 它访问gicd mmio register的指令, 会trap到el2, 但是在el2处理完毕后, 仅仅会将elr_el2加4,
+但是在编译优化的场景下, 可能会导致vm访问内存的指令和后面的自增指令合并成一条指令执行, 但这种情况下, 陷入EL2后,
+仅在EL2层面模拟并记录了gicd mmio write指令操作的内容, 但是没有模拟优化后指令针对通用寄存器自增的操作, 最终导致死循环！
+详细展开讲一下: 在gicdinit函数的for循环中没有printf的场景下, 其汇编指令如下:
+ ffffff804000786c:   b8004401    str w1, [x0], #4						// 直接将值写入地址 [x0]，并将 x0 自增 4
+ ffffff8040007870:   17fffffc    b   ffffff8040007860 <gicv3init+0x70>	
+可以看到, 在编译优化的场景下, 编译器将地址计算和内存写入合并为一条指令，减少了指令数量。原本正确情况没有Hypervisor的场景下,
+“str w1, [x0], #4” 这条指令执行后, x0会自增4！但是, 在虚拟化场景下, 这条指令访问了没有映射stage2页表的gicd mmio区域后, 会trap
+陷入到EL2, 但是在el2的处理函数中, 支持把vm操作mmio的写入数据记录到EL2的内存管理数据中, 结束后仅仅修改了elr_el2, 让其加4, 
+除此之外没有修改其他任何寄存器了, 这样就导致了原本这条语句期望的x0自增4的操作没有执行, 进而导致死循环！
+
+进一步验证上述root cause: 
+	a) 没有编译优化情况下, for循环每次访问gicd mmio陷入EL2的x0寄存器内容都会变化:
+		i=2
+		[lower_el_sync_handler]: vm=xv6, vcpuid=0
+          esr_el2  : 0x93970046		// SRT(Syndrome Register Transfer): 0b10111（即: x23）, 就是str w1, [x0], #4中的w1
+		  x00: 0x88
+
+		i=3
+		[lower_el_sync_handler]: vm=xv6, vcpuid=0
+          esr_el2  : 0x93970046
+		  x00: 0x8c
+
+		i=4
+		[lower_el_sync_handler]: vm=xv6, vcpuid=0
+          esr_el2  : 0x93970046
+		  x00: 0x90
+
+	b) 编译优化后, for循环每次访问gicd mmio陷入EL2的x0寄存器内容都没有变化, 这是因为Hypervisor没有模拟x0自增4的这个行为！！！
+		[lower_el_sync_handler]: vm=xv6, vcpuid=0
+		  esr_el2  : 0x93810046		// SRT(Syndrome Register Transfer): 0b00001（即: x1）, 就是str w23, [x1, x0]中的w23
+		  x00: 0xffffff8008000080
+
+		[lower_el_sync_handler]: vm=xv6, vcpuid=0
+		  esr_el2  : 0x93810046
+		  x00: 0xffffff8008000080
+
+		[lower_el_sync_handler]: vm=xv6, vcpuid=0
+		  esr_el2  : 0x93810046
+		  x00: 0xffffff8008000080
+综上: 
+    该问题由于 “编译优化” + “Hypervisor处理mmio模拟时, 没有考虑VM编译优化后的指令可能合并多个操作如x0自增1的场景” 这两种原因导致的！
+Fix:
+ - 方案1: 在函数gicdinit前增加__attribute__((optimize("O0"))), 声明禁用编译优化 !
+ - 方案2: 修改xv6的Makefile, 禁止-Os编译优化选项, 改用-O0！（最终采取了该方案修复）
+
+
+· 问题3:
+
+
+
+
+
+· 问题4:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

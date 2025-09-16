@@ -1,0 +1,1 @@
+aarch64-linux-gnu-readelf -l guest/xv6/kernel/xv6 | awk '/LOAD/ {getline; print $$6; exit}' | awk '{print $2}' > .xv6_size

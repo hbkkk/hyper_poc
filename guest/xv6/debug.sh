@@ -1,0 +1,1 @@
+gdb-multiarch kernel/kernel -q -x gdb_script.gdb
