@@ -49,10 +49,6 @@ freerange(void *vstart, void *vend)
 // which normally should have been returned by a
 // call to kalloc().  (The exception is when
 // initializing the allocator; see kinit above.)
-
-unsigned long free_count = 0;
-extern int console_ready;
-
 void
 kfree(void *va)
 {
@@ -67,12 +63,9 @@ kfree(void *va)
   r = (struct run*)va;
 
   acquire(&kmem.lock);
-  free_count++;
   r->next = kmem.freelist;
   kmem.freelist = r;
   release(&kmem.lock);
-  if (console_ready && free_count < 3)
-    printf("[kfree]: free_count=%d\n", free_count);
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -82,21 +75,14 @@ void *
 kalloc(void)
 {
   struct run *r;
-  if (console_ready && free_count < 3)
-    printf("[kalloc]: free_count=%d\n", free_count);
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r) {
+  if(r)
     kmem.freelist = r->next;
-    free_count--;
-  } else {
-    printf("[kalloc]: kmem.freelist is NULL ??? free_count=%d\n", free_count);
-  }
   release(&kmem.lock);
 
-  if(r) {
+  if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
-  }
   return (void*)r;
 }
