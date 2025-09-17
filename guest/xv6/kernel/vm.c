@@ -50,7 +50,6 @@ kvminit(void)
   kernel_pagetable = kvmmake();
 }
 
-#if 0 // useless code
 void kvminit2()
 {
   // pagetable_t kpgtbl = (pagetable_t) kalloc();
@@ -91,7 +90,6 @@ void kvminit2()
   kvmmap(kpgtbl, (uint64)etext, V2P(etext), (uint64)P2V(PHYSTOP)-(uint64)etext, PTE_NORMAL | PTE_XN);
   kernel_pagetable = kpgtbl;
 }
-#endif
 
 // Switch h/w page table register to the kernel's page table,
 // and enable paging.
@@ -414,14 +412,11 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0) {
-      printf("### uvmcopy: kalloc failed, return 0\n");
+    if((mem = kalloc()) == 0)
       goto err;
-    }
     memmove(mem, (char*)P2V(pa), PGSIZE);
     if(mappages(new, i, PGSIZE, V2P(mem), flags) != 0){
       kfree(mem);
-      printf("### uvmcopy: mappages failed\n");
       goto err;
     }
   }

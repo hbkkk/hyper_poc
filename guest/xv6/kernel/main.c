@@ -13,8 +13,6 @@ void _entry(void);
 void psci_call(uint64 fn, int cpuid, uint64 entry, uint64 ctxid);
 void delay(uint32 c);
 
-int console_ready = 0;
-
 // start() jumps here in EL1 on all CPUs.
 void
 main()
@@ -28,10 +26,9 @@ main()
     kvminithart();   // turn on paging
     kinit2((void*)(KERNLINK+2*1024*1024), P2V(PHYSTOP));
     consoleinit();
-    console_ready = 1;
     printfinit();
     printf("\n");
-    printf("xv6 kernel is booting\n");
+    printf("xv6 kernel is booting...\n");
     printf("\n");
     procinit();      // process table
     trapinit();      // trap vectors
@@ -44,6 +41,8 @@ main()
     fileinit();      // file table
     virtio_disk_init(); // emulated hard disk
     userinit();      // first user process
+    uint64 intr_status = daif();
+    printf("After userinit, intr_status=0x%x\n", intr_status);
     __sync_synchronize();
     started = 1;
   } else {
@@ -51,11 +50,14 @@ main()
       ;
     __sync_synchronize();
     kvminithart();    // turn on paging
-    printf("hart %d starting\n", cpuid());
+    uint64 intr_status = daif();
+    printf("hart %d starting, intr_status=0x%x\n", cpuid(), intr_status);
     trapinithart();   // install trap vector
     gicv3inithart();
     timerinit();
   }
+
+  printf("\n>>>>>>> xv6 cpu(%d) ready to call scheduler\n\n", cpuid());
 
   scheduler();
 }
